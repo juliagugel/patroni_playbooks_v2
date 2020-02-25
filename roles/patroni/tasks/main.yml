@@ -1,0 +1,255 @@
+- name: check if epel rpm already is there
+  stat:
+    path: /root/epel-release-latest-7.noarch.rpm
+  register: epel_rpm_available
+ 
+- name: Download the EPEL rpm
+  get_url:
+    url: http://dl.fedoraproject.org/pub/epel/epel-release-latest-7.noarch.rpm
+    dest: /root/epel-release-latest-7.noarch.rpm
+    mode: 0440
+  when: epel_rpm_available.stat.exists == false
+ 
+- name: check if epel repository is already installed
+  stat:
+    path: /etc/yum.repos.d/epel.repo
+  register: epel_installed
+ 
+- name: Install the EPEL rpm
+  shell: yum localinstall -y /root/epel-release-latest-7.noarch.rpm
+  args: 
+    warn: false
+  when: epel_installed.stat.exists == false
+
+- name: Install all dependencies for Patroni
+  yum:
+    name: ['python3-pip','PyYAML', 'bind-utils', 'keepalived', 'haproxy', 'chrony']
+    state: present
+
+- name: Install watchdog
+  yum:
+   name: watchdog
+   state: present
+
+- name: Create /etc/hosts file
+  template:
+    src: hosts.j2
+    dest: /etc/hosts
+    owner: root
+    group: root
+    mode: 0644
+ 
+- name: Copy the watchdog.conf template
+  template:
+    src: watchdog.conf.j2
+    dest: /etc/watchdog.conf
+    owner: root
+    group: root
+    mode: 0644
+
+
+#disable und stop firewalld 
+- name: Be sure firewalld is disabled
+  systemd: name=firewalld enabled=no
+  tags:
+   - install
+   - firewalld
+
+- name: Be sure firewalld is stopped
+  systemd: name=firewalld state=stopped
+  ignore_errors: yes
+  tags:
+   - install
+   - firewalld
+
+- name: Check if etcd sources already exist
+  stat:
+    path: /home/{{ postgres_user }}/etcd-v{{ etcd_version }}-linux-amd64.tar.gz
+  register: etcd_source_available
+ 
+- name: Copy etcd
+  copy:
+    src: etcd-v{{ etcd_version }}-linux-amd64.tar.gz
+    dest: /home/{{ postgres_user }}/etcd-v{{ etcd_version }}-linux-amd64.tar.gz
+    mode: 0755
+  when: etcd_source_available.stat.exists == false
+ 
+- name: Check if etcd is available in DMK
+  stat:
+    path: /u01/app/{{ postgres_user }}/local/dmk/bin/etcd
+  register: etcd_copied_to_dmk
+ 
+- name: Extract etcd
+  shell: cd /home/{{ postgres_user }}/; tar -axf etcd-v{{ etcd_version }}-linux-amd64.tar.gz
+  become: yes
+  become_user: "{{ postgres_user }}"
+  when: etcd_copied_to_dmk.stat.exists == false
+ 
+- name: copy etcd to DMK
+  shell: cp /home/{{ postgres_user }}/etcd-v{{ etcd_version }}-linux-amd64/etcd* /u01/app/{{ postgres_user }}/local/dmk/bin/
+  become: yes
+  become_user: "{{ postgres_user }}"
+  when: etcd_copied_to_dmk.stat.exists == false
+ 
+- template:
+    src: etcd.conf.j2
+    dest: /u01/app/{{ postgres_user }}/local/dmk/etc/etcd.conf
+    owner: "{{ postgres_user }}"
+    group: "{{ postgres_group }}"
+    mode: 0700
+ 
+- name: Copy the etcd systemd service file
+  copy:
+    src: etcd.service
+    dest: /etc/systemd/system/etcd.service
+    owner: root
+    group: root
+    mode: 0755
+ 
+- file:
+    path: /u02/pgdata/etcd
+    state: directory
+    mode: 0700
+    recurse: yes
+    owner: "{{ postgres_user }}"
+    group: "{{ postgres_group }}"
+ 
+- name: force systemd to reread configs
+  systemd:
+    daemon_reload: yes
+ 
+- name: Enable the systemd etcd service
+  systemd:
+    name: etcd
+    enabled: yes
+ 
+- name: Enable the systemd watchdog service
+  systemd:
+    name: watchdog
+    enabled: yes
+
+- name: Start service chronyd, if not started
+  service:
+    name: chronyd
+    state: started
+
+- name: Start service watchdog, if not started
+  service:
+    name: watchdog
+    state: started
+
+- name: Start service etcd, if not started
+  service:
+    name: etcd
+    state: started
+
+- name: check if patroni is already installed
+  stat:
+    path: /home/{{ postgres_user }}/.local/bin/patroni
+  register: patroni_is_installed
+ 
+- name: install and upgrade pip
+  shell: python3 -m pip install --upgrade pip
+  become: yes
+  become_user: root
+  when: patroni_is_installed.stat.exists == false
+  
+- name: install and upgrade setuptools
+  become: yes
+  become_user: "{{ postgres_user }}"
+  shell: python3 -m pip install --upgrade --user setuptools
+  when: patroni_is_installed.stat.exists == false
+ 
+- name: install psycopg2-binary
+  become: yes
+  become_user: "{{ postgres_user }}"
+  shell: python3 -m pip install --user psycopg2-binary
+  when: patroni_is_installed.stat.exists == false
+ 
+- name: install patroni
+  become: yes
+  become_user: "{{ postgres_user }}"
+  shell: python3 -m pip install --user patroni[etcd]
+  when: patroni_is_installed.stat.exists == false
+
+- name: copy patroni to dmk 
+  file:
+    src: /home/{{ postgres_user }}/.local/bin/patroni
+    dest: /u01/app/{{ postgres_user }}/local/dmk/bin/patroni
+    owner: "{{ postgres_user }}"
+    group: "{{ postgres_user }}"
+    state: link
+
+- name: copy patronictl to dmk 
+  file:
+    src: /home/{{ postgres_user }}/.local/bin/patronictl
+    dest: /u01/app/{{ postgres_user }}/local/dmk/bin/patronictl
+    owner: "{{ postgres_user }}"
+    group: "{{ postgres_user }}"
+    state: link
+
+- name: get patroni.yml template 
+  template:
+    src: patroni.yml.j2
+    dest: /u01/app/{{ postgres_user }}/local/dmk/etc/patroni.yml
+    owner: "{{ postgres_user }}"
+    group: "{{ postgres_group }}"
+    mode: 0600
+ 
+- name: Copy the patroni systemd service file
+  copy:
+    src: patroni.service
+    dest: /etc/systemd/system/patroni.service
+    owner: root
+    group: root
+    mode: 0755
+ 
+- name: force systemd to reread configs 
+  systemd:
+    daemon_reload: yes
+ 
+- name: Enable the systemd patroni service
+  systemd:
+    name: patroni
+    enabled: yes
+
+- name: Start service patroni, if not started
+  service:
+    name: patroni
+    state: started
+
+- name: Add the instance to /etc/pgtab so DMK is aware of if
+  lineinfile:
+    path: /etc/pgtab
+    line: '{{ cluster_name }}:/u01/app/{{ postgres_user }}/product/{{ dmk_postgresql_version }}:/u02/pgdata/{{ postgresql_major_version }}/{{ cluster_name }}:5432:N'
+ 
+- name: Copy haproxy.cfg template
+  template:
+    src: haproxy.cfg.j2
+    dest: /etc/haproxy/haproxy.cfg
+    owner: "{{ postgres_user }}"
+    group: "{{ postgres_group }}"
+    mode: 0600
+ 
+- name: Enable the systemd haproxy service
+  systemd:
+    name: haproxy
+    enabled: yes
+ 
+# we need to set this so haproxy can be started
+- name: Set selinux context for ha proxy
+  shell: setsebool -P haproxy_connect_any=1
+
+- name: Start service haproxy, if not started
+  service:
+    name: haproxy
+    state: started
+ 
+- template:
+    src: keepalived.conf.j2
+    dest: /etc/keepalived/keepalived.conf
+    owner: "{{ postgres_user }}"
+    group: "{{ postgres_group }}"
+    mode: 0600
+  with_items:
+    - { role: "{{ hostvars[inventory_hostname].keepalived_role }}" , priority: "{{ hostvars[inventory_hostname].keepalived_priority }}" }

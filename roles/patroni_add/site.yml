@@ -1,0 +1,14 @@
+---
+# This playbook deploys an additional node to the additional PostgreSQL cluster
+ 
+- hosts: patroniservers
+  become: true
+
+- hosts: patroniaddnode
+  become: true
+  become_user: root
+ 
+  roles:
+    - prepare
+    - common
+    - patroni_add

@@ -1,0 +1,11 @@
+---
+# This playbook deploys a three node patroni PostgreSQL cluster with HAProxy
+ 
+- hosts: patroniservers
+  become: true
+  become_user: root
+ 
+  roles:
+    - prepare
+    - common
+    - patroni
